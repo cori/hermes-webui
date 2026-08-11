@@ -46,19 +46,31 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Extract tags from the git ref (supports vX.Y and vX.Y.Z formats)
-      - name: Extract metadata
+      - name: Extract metadata (upstream)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
-            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1
+            type=match,pattern=v(\\d+\\.\\d+(?:\\.\\d+)?),group=1
+            type=match,pattern=exp-v(\\d+\\.\\d+(?:\\.\\d+)?),group=1
             type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
             type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
 
-      # Build and push multi-arch image (amd64 + arm64)
-      - name: Build and push Docker image
+      # Also extract metadata for the fork registry (for runtipi-appstore)
+      - name: Extract metadata (fork)
+        id: meta-fork
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/cori/hermes-webui
+          tags: |
+            type=match,pattern=v(\\d+\\.\\d+(?:\\.\\d+)?),group=1
+            type=match,pattern=exp-v(\\d+\\.\\d+(?:\\.\\d+)?),group=1
+            type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
+            type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
+
+      # Build and push multi-arch image (amd64 + arm64) to upstream registry
+      - name: Build and push Docker image (upstream)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -66,6 +78,19 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: HERMES_VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Build and push multi-arch image to fork registry (for runtipi-appstore)
+      - name: Build and push Docker image (fork)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-fork.outputs.tags }}
+          labels: ${{ steps.meta-fork.outputs.labels }}
           build-args: HERMES_VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
