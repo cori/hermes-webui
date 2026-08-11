@@ -67,6 +67,11 @@ jobs:
             --json number \
             --jq 'length > 0' | grep -qx true; then
             echo "Updated existing sync PR."
+            # Ensure automerge label is set on existing PR
+            gh pr edit \
+              --repo "${{ github.repository }}" \
+              --add-label "automerge" \
+              "sync/upstream-master" || true
             exit 0
           fi
 
@@ -75,4 +80,5 @@ jobs:
             --base master \
             --head sync/upstream-master \
             --title "chore: sync upstream ${UPSTREAM_REF}" \
-            --body "Prepared from nesquena/hermes-webui@${UPSTREAM_REF}. Review and merge this PR when you choose; this workflow never merges upstream automatically."
+            --label "automerge" \
+            --body "Prepared from nesquena/hermes-webui@${UPSTREAM_REF}. Auto-merge enabled — will merge automatically when CI passes."
