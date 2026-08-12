@@ -14,6 +14,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,22 +71,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: cori/rtappstore
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/checkout@v4
-        with:
-          path: hermes-webui
-          fetch-depth: 0
+          token: ${{ secrets.RTAPPSTORE_PAT }}
 
       - name: Update hermes-webui version
         id: version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          cd hermes-webui
-          VERSION=$(git describe --tags --always)
           echo "Version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          cd "$GITHUB_WORKSPACE"
 
           # Update config.json
           jq --arg version "$VERSION" \
@@ -112,7 +107,7 @@ jobs:
 
       - name: Create PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RTAPPSTORE_PAT }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
