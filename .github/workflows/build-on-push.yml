@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,9 +34,12 @@ jobs:
       - name: Get version
         id: version
         run: |
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
           VERSION=$(git describe --tags --always)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
+          echo "Short SHA: $SHORT_SHA"
 
       - name: Extract metadata
         id: meta
@@ -76,7 +80,7 @@ jobs:
       - name: Update hermes-webui version
         id: version
         env:
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.short_sha }}
         run: |
           echo "Version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -89,8 +93,8 @@ jobs:
              apps/hermes-webui/config.json > apps/hermes-webui/config.json.tmp && \
             mv apps/hermes-webui/config.json.tmp apps/hermes-webui/config.json
 
-          # Update docker-compose.json
-          jq --arg version "$VERSION" \
+          # Update docker-compose.json to use sha-<short> tag
+          jq --arg version "sha-$VERSION" \
              '.services[0].image = "ghcr.io/cori/hermes-webui:" + $version' \
              apps/hermes-webui/docker-compose.json > apps/hermes-webui/docker-compose.json.tmp && \
             mv apps/hermes-webui/docker-compose.json.tmp apps/hermes-webui/docker-compose.json
@@ -130,6 +134,6 @@ jobs:
 
             - Version: ${{ steps.version.outputs.version }}
             - tipi_version: ${{ steps.version.outputs.tipi_version }}
-            - Image: ghcr.io/cori/hermes-webui:${{ steps.version.outputs.version }}
+            - Image: ghcr.io/cori/hermes-webui:sha-${{ steps.version.outputs.version }}
 
             All validation tests pass."
