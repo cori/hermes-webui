@@ -108,7 +108,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          BRANCH="update-hermes-webui-${{ steps.version.outputs.version }}-${{ github.sha::7 }}"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH="update-hermes-webui-${{ steps.version.outputs.version }}-${SHORT_SHA}"
           git checkout -b "$BRANCH"
           
           git add apps/hermes-webui/config.json apps/hermes-webui/docker-compose.json
