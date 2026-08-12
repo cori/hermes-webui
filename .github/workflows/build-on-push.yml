@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
 
@@ -26,6 +28,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(git describe --tags --always)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -35,6 +44,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=sha,prefix=sha-
+            type=raw,value=${{ steps.version.outputs.version }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -44,6 +54,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: HERMES_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -60,25 +71,21 @@ jobs:
           repository: cori/rtappstore
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: actions/checkout@v4
+        with:
+          path: hermes-webui
+          fetch-depth: 0
+
       - name: Update hermes-webui version
         id: version
         run: |
-          # Get the latest tag from hermes-webui that matches vX.Y.Z
-          LATEST_TAG=$(git ls-remote --tags https://github.com/cori/hermes-webui.git 'v*.*.*' | \
-            grep -v '\^{}' | \
-            sed 's/.*refs\/tags\///' | \
-            sort -V | \
-            tail -1)
-          
-          if [ -z "$LATEST_TAG" ]; then
-            echo "No version tag found"
-            exit 1
-          fi
-          
-          VERSION=${LATEST_TAG#v}
-          echo "Latest tag: $LATEST_TAG"
+          cd hermes-webui
+          VERSION=$(git describe --tags --always)
           echo "Version: $VERSION"
-          
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          cd "$GITHUB_WORKSPACE"
+
           # Update config.json
           jq --arg version "$VERSION" \
              --arg tipi_version "$(jq -r '.tipi_version + 1' apps/hermes-webui/config.json)" \
@@ -86,14 +93,13 @@ jobs:
              '.version = $version | .tipi_version = ($tipi_version | tonumber) | .updated_at = ($updated_at | tonumber)' \
              apps/hermes-webui/config.json > apps/hermes-webui/config.json.tmp && \
             mv apps/hermes-webui/config.json.tmp apps/hermes-webui/config.json
-          
+
           # Update docker-compose.json
           jq --arg version "$VERSION" \
              '.services[0].image = "ghcr.io/cori/hermes-webui:" + $version' \
              apps/hermes-webui/docker-compose.json > apps/hermes-webui/docker-compose.json.tmp && \
             mv apps/hermes-webui/docker-compose.json.tmp apps/hermes-webui/docker-compose.json
-          
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           echo "tipi_version=$(jq -r '.tipi_version' apps/hermes-webui/config.json)" >> "$GITHUB_OUTPUT"
 
       - name: Validate with bun test
@@ -107,16 +113,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
+
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           BRANCH="update-hermes-webui-${{ steps.version.outputs.version }}-${SHORT_SHA}"
           git checkout -b "$BRANCH"
-          
+
           git add apps/hermes-webui/config.json apps/hermes-webui/docker-compose.json
           git commit -m "app: update hermes-webui to ${{ steps.version.outputs.version }} (auto from push)"
-          
+
           git push origin "$BRANCH"
-          
+
           gh pr create \
             --repo cori/rtappstore \
             --base main \
@@ -127,5 +133,5 @@ jobs:
             - Version: ${{ steps.version.outputs.version }}
             - tipi_version: ${{ steps.version.outputs.tipi_version }}
             - Image: ghcr.io/cori/hermes-webui:${{ steps.version.outputs.version }}
-            
+
             All validation tests pass."
