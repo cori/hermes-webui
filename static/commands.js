@@ -250,8 +250,15 @@ let _slashPersonalityCachePromise=null;
 let _bundleCommandCache=[];
 let _bundleCommandLoadPromise=null;
 let _bundleCommandCacheReady=false;
+// Bumped by invalidateSlashSkillCaches(). The two skill-cache loaders below capture
+// it when they issue /api/skills and refuse to commit when it moved while their
+// response was in flight: a reply generated for the previous profile would otherwise
+// land after a profile switch and repopulate the caches with that profile's
+// disabled-filtered payload, keeping a skill that is enabled in the new profile
+// hidden (#7509).
 let _slashSkillCache=null;
 let _slashSkillCachePromise=null;
+let _slashSkillCacheGen=0;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
@@ -351,31 +358,47 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+// Disabled skills are excluded from the backend skill-command map, so the slash
+// picker surfaces must agree. Single gate for every place that turns /api/skills
+// entries into selectable completions.
+function _isSkillDisabled(skill){
+  return !!(skill&&skill.disabled);
+}
+
 async function _loadSlashSkillSubArgs(force=false){
   if(_slashSkillCache&&!force) return _slashSkillCache;
   if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  const gen=_slashSkillCacheGen;
   _slashSkillCachePromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const values=[];
       for(const skill of (data&&data.skills)||[]){
+        if(_isSkillDisabled(skill)) continue;
         const name=_normalizeSlashSubArg(skill&&skill.name);
         if(name) values.push(name);
       }
       const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      // A profile switch during the request bumped the generation: this payload
+      // belongs to the previous profile, so leave the cache empty for the fresh
+      // read instead of publishing stale names (#7509).
+      if(gen!==_slashSkillCacheGen) return _slashSkillCache||[];
       _slashSkillCache=deduped;
       return deduped;
     }catch(_){
-      _slashSkillCache=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCache=null;
       return [];
     }finally{
-      _slashSkillCachePromise=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCachePromise=null;
     }
   })();
   return _slashSkillCachePromise;
 }
 
 function invalidateSlashSkillCaches(){
+  // Bump before dropping the caches: an /api/skills response still in flight was
+  // generated for the previous profile and must not commit once it lands (#7509).
+  _slashSkillCacheGen++;
   _slashSkillCache=null;
   _slashSkillCachePromise=null;
   _skillCommandCache=[];
@@ -1101,47 +1124,59 @@ async function cmdTheme(args){
   showToast(t('theme_usage')+themes.join('|')+' | '+skins.join('|')+' | legacy:'+legacyThemes.join('|'));
 }
 
-async function cmdSkills(args){
-  try{
-    const data = await api('/api/skills');
-    let skills = data.skills || [];
-    if(args){
-      const q = args.toLowerCase();
-      skills = skills.filter(s =>
-        (s.name||'').toLowerCase().includes(q) ||
-        (s.description||'').toLowerCase().includes(q) ||
-        (s.category||'').toLowerCase().includes(q)
-      );
-    }
-    if(!skills.length){
-      const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
-      S.messages.push(msg); renderMessages(); return;
-    }
-    // Group by category
-    const byCategory = {};
-    skills.forEach(s => {
-      const cat = s.category || 'General';
-      if(!byCategory[cat]) byCategory[cat] = [];
-      byCategory[cat].push(s);
-    });
-    const lines = [];
-    for(const [cat, items] of Object.entries(byCategory).sort()){
-      lines.push(`**${cat}**`);
-      items.forEach(s => {
-        const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
-        lines.push(`  \`${s.name}\`${desc}`);
+// Subcommands owned by the agent's own /skills write-approval handler
+// (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
+// fall through to the normal send path rather than be swallowed by the local search below.
+// Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
+// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
+
+function cmdSkills(args){
+  const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
+  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)) return false;
+  (async()=>{
+    try{
+      const data = await api('/api/skills');
+      let skills = data.skills || [];
+      if(args){
+        const q = args.toLowerCase();
+        skills = skills.filter(s =>
+          (s.name||'').toLowerCase().includes(q) ||
+          (s.description||'').toLowerCase().includes(q) ||
+          (s.category||'').toLowerCase().includes(q)
+        );
+      }
+      if(!skills.length){
+        const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
+        S.messages.push(msg); renderMessages(); return;
+      }
+      // Group by category
+      const byCategory = {};
+      skills.forEach(s => {
+        const cat = s.category || 'General';
+        if(!byCategory[cat]) byCategory[cat] = [];
+        byCategory[cat].push(s);
       });
-      lines.push('');
+      const lines = [];
+      for(const [cat, items] of Object.entries(byCategory).sort()){
+        lines.push(`**${cat}**`);
+        items.forEach(s => {
+          const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
+          lines.push(`  \`${s.name}\`${desc}`);
+        });
+        lines.push('');
+      }
+      const header = args
+        ? `Skills matching "${args}" (${skills.length}):\n\n`
+        : `Available skills (${skills.length}):\n\n`;
+      S.messages.push({role:'assistant', content: header + lines.join('\n')});
+      renderMessages();
+      showToast(t('type_slash'));
+    }catch(e){
+      showToast('Failed to load skills: '+e.message);
     }
-    const header = args
-      ? `Skills matching "${args}" (${skills.length}):\n\n`
-      : `Available skills (${skills.length}):\n\n`;
-    S.messages.push({role:'assistant', content: header + lines.join('\n')});
-    renderMessages();
-    showToast(t('type_slash'));
-  }catch(e){
-    showToast('Failed to load skills: '+e.message);
-  }
+  })();
+  return true;
 }
 
 async function cmdUse(args){
@@ -1232,12 +1267,39 @@ async function cmdGoal(args){
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
   try{
+    // #6703: re-assert the explicit-pick marker on /api/goal the same way
+    // /api/chat/start does. Without it the server's model resolver treats a
+    // persisted cross-provider pick as stale and silently reverts the session
+    // to the profile default mid-session (e.g. while /goal is running).
+    const _goalModel=S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
+    const _goalProvider=S.session.model_provider||null;
+    const _pendingPick=(typeof _readPendingSessionModel==='function')
+      ? _readPendingSessionModel(activeSid)
+      : null;
+    const _pendingPickMatch=_pendingPick
+      && _pendingPick.model===_goalModel
+      && String(_pendingPick.model_provider||'')===String(_goalProvider||'');
+    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
+    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
+    const _isCrossProviderPick=_goalModel
+      && _goalProvider
+      && _defaultModel
+      && _activeProvider
+      && _goalModel !== _defaultModel
+      && String(_goalProvider||'') !== String(_activeProvider||'');
+    const _explicitPick=(_pendingPickMatch||_isCrossProviderPick)||undefined;
+    // Do NOT consume the pending explicit-pick marker here: a control-only
+    // invocation (e.g. /goal status) skips server-side model resolution, so a
+    // pre-request clear would drop the pick without using it. Consume it below,
+    // only after a successful kickoff (r.stream_id), re-checking that the stored
+    // marker still matches the model/provider captured for this kickoff (#6705).
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
       workspace:S.session.workspace,
-      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
-      model_provider:S.session.model_provider||null,
+      model:_goalModel,
+      model_provider:_goalProvider,
+      explicit_model_pick:_explicitPick,
       profile:S.activeProfile||S.session.profile||'default',
     })});
     const msg = (() => {
@@ -1257,6 +1319,19 @@ async function cmdGoal(args){
       showToast(msg.split('\n')[0],2600);
     }
     if(!r||!r.stream_id)return;
+    // #6705: consume the one-shot pending explicit-pick marker only after a
+    // successful kickoff. Re-read the stored marker and clear it only if it
+    // still matches the model/provider captured above — a control command (no
+    // stream_id) must leave the marker intact for the next real send, and a
+    // marker re-recorded mid-flight (newer onchange) must not be clobbered.
+    if(_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'){
+      const _stillPending=_readPendingSessionModel(activeSid);
+      if(_stillPending
+        && _stillPending.model===_goalModel
+        && String(_stillPending.model_provider||'')===String(_goalProvider||'')){
+        _clearPendingSessionModel(activeSid);
+      }
+    }
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
@@ -1901,22 +1976,50 @@ function cmdVoice(){
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  const generation=_loadSessionGeneration;
+  const viewIsCurrent=()=>!!(
+    S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
+  );
+  let approvalOwner=null;
   try{
-    // Check current state first to toggle
+    // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    if(!viewIsCurrent())return;
     const enable=!status.yolo_enabled;
-    await api('/api/session/yolo',{
+    // A visible approval must belong to this exact session load before any
+    // command handler may POST through it. Otherwise fail closed.
+    const card=$('approvalCard');
+    if(card&&card.classList.contains('visible')){
+      approvalOwner=typeof _captureApprovalResponseOwner==='function'
+        ?_captureApprovalResponseOwner()
+        :null;
+      if(!approvalOwner)return;
+      if(enable&&typeof toggleYoloFromApproval==='function'){
+        await toggleYoloFromApproval();
+        return;
+      }
+    }
+    const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),
     });
-    _yoloEnabled=enable;
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
+    _yoloEnabled=settled;
     _updateYoloPill();
-    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
-    if(enable){
-      // Dismiss any visible approval card
-      hideApprovalCard(true);
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
-  }catch(e){showToast('YOLO: '+e.message);}
+    if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
+      _yoloEnabled=errorPayload.yolo_enabled;
+      _updateYoloPill();
+    }
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }
 }
 
 // ── Branch / fork command ──
@@ -2028,6 +2131,7 @@ function _getReservedSlashCommandSlugs(){
   return reserved;
 }
 function _buildSkillCommandEntry(skill){
+  if(_isSkillDisabled(skill))return null;
   const skillName=String(skill&&skill.name||'').trim();
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
@@ -2049,14 +2153,32 @@ function _buildBundleCommandEntry(bundle){
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
+  const gen=_slashSkillCacheGen;
+  let _committed=false;
   _skillCommandLoadPromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      // Bumped by a profile switch while we were awaiting: keep the cache empty
+      // (and not "ready") so the composer's next pass loads the new profile (#7509).
+      if(gen!==_slashSkillCacheGen) return _skillCommandCache;
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_skillCommandCache=[];}
-    finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+      _committed=true;
+    }catch(_){
+      if(gen===_slashSkillCacheGen)_skillCommandCache=[];
+    }
+    finally{
+      // Only publish the cache as "ready" after a SUCCESSFUL current-generation
+      // commit. Marking it ready in the failure path (what master does
+      // unconditionally) permanently wedges the picker: a single transient
+      // /api/skills rejection leaves ready=true + cache=[], and
+      // ensureSkillCommandsLoadedForAutocomplete() only retries when
+      // !ready && !promise — so skill commands stay missing until a page
+      // reload even after the API recovers. Clear the promise either way so the
+      // next picker pass can retry.
+      if(gen===_slashSkillCacheGen){_skillCommandCacheReady=_committed;_skillCommandLoadPromise=null;}
+    }
     return _skillCommandCache;
   })();
   return _skillCommandLoadPromise;
