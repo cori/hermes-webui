@@ -1,0 +1,90 @@
+name: Prepare upstream sync
+
+on:
+  schedule:
+    # Run daily at 03:00 UTC - creates/updates a review PR with upstream changes
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream branch or commit to prepare for review
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: prepare-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          # Do NOT persist the default GITHUB_TOKEN as the git credential:
+          # it cannot push changes to .github/workflows/* files (upstream
+          # added docker-smoke.yml, which broke this workflow daily). The
+          # merge step switches the push URL to a PAT with workflows scope.
+          persist-credentials: false
+
+      - name: Prepare upstream merge
+        id: merge
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/nesquena/hermes-webui.git
+          git remote set-url origin "https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git"
+          git fetch --no-tags upstream "$UPSTREAM_REF"
+          git checkout -B sync/upstream-master origin/master
+          BEFORE=$(git rev-parse HEAD)
+          git merge --no-ff --no-edit FETCH_HEAD
+
+          if [ "$BEFORE" = "$(git rev-parse HEAD)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push --force-with-lease origin sync/upstream-master
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or refresh fork sync PR
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          if gh pr list \
+            --repo "${{ github.repository }}" \
+            --base master \
+            --head "${{ github.repository_owner }}:sync/upstream-master" \
+            --state open \
+            --json number \
+            --jq 'length > 0' | grep -qx true; then
+            echo "Updated existing sync PR."
+            # Ensure automerge label is set on existing PR
+            gh pr edit \
+              --repo "${{ github.repository }}" \
+              --add-label "automerge" \
+              "sync/upstream-master" || true
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --base master \
+            --head sync/upstream-master \
+            --title "chore: sync upstream ${UPSTREAM_REF}" \
+            --label "automerge" \
+            --body "Prepared from nesquena/hermes-webui@${UPSTREAM_REF}. Auto-merge enabled — will merge automatically when CI passes."
