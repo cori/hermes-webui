@@ -50,14 +50,14 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/cori/hermes-webui
           tags: |
-            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
-            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1
+            type=match,pattern=v(\\d+\\.\\d+(?:\\.\\d+)?),group=1
+            type=match,pattern=exp-v(\\d+\\.\\d+(?:\\.\\d+)?),group=1
             type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
             type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
 
-      # Build and push multi-arch image (amd64 + arm64)
+      # Build and push multi-arch image (amd64 + arm64) to fork registry
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
