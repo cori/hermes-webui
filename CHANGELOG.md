@@ -49,6 +49,8 @@
 
 ### Security
 
+- **Behind a reverse proxy, login rate limiting is per client again, and a client cannot pick its own bucket.** The password and passkey login limiters keyed on the socket peer, which behind a proxy is the proxy itself, so one user's failed logins locked out everyone. They now key on the forwarded client address, but only when `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` and the proxy's address is listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS` (implicit loopback trust is not enough, so a direct or SSH-tunnel client cannot send a fresh `X-Forwarded-For` on every attempt). Every `X-Forwarded-For` and `X-Real-IP` field is checked: if they disagree, a field is empty or a value is not an address, failed logins count against the socket peer as before. `.env.example` explains the trade-off of listing a loopback address. Thanks @codechrl. (#7850)
+
 - **Gateway chat no longer sends one profile's Gateway key to another profile's Gateway.** When the WebUI runs on a named profile whose `.env` sets its own Gateway URL, a session on a different profile that sets only a Gateway key (no URL of its own) sent that key to the first profile's Gateway, so the request failed with 401 or exposed the key to the wrong server. Such a profile now uses the WebUI's own Gateway URL and key together, which is what v0.52.492 and earlier sent. Profiles that set their own `HERMES_WEBUI_GATEWAY_BASE_URL`, shared operator configuration and launcher-exported URLs behave as before. To give a profile its own Gateway, set its own `HERMES_WEBUI_GATEWAY_BASE_URL`. (#8435, fixes #8432)
 
 - **Update timeout messages never echo credentials.** When an in-app update's fetch times out, the message names the cancelled operation; that operation text now goes through the same credential scrub as every other update diagnostic, so a remote URL with embedded userinfo or a token would be shown redacted. The message is unchanged for the fetches the updater runs today. Thanks @pcsokonay. (#8415)
@@ -66,6 +68,11 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Docker first start survives files vanishing during the ownership walk.** A fresh container could fail its first
+  start at random when files disappeared while the init script aligned ownership. The walk now tolerates only
+  `chown`'s own ENOENT, migrates old-UID files in writable Agent checkouts and `.git` metadata after a UID change, and
+  still fails on real permission, read-only or disk-full errors. Thanks @gakugaku. (#8154, fixes #8106)
 
 - **Docker: the staged Agent copy that auto-install uses is checked and used as one path, and a bad stage setting no longer stops startup.** Since exp-v0.52.540 the WebUI installs Agent dependencies from a writable staged copy when the Agent source is mounted read-only. The staged path was resolved only after its trust checks, so a symlink swapped in between could point the install at a directory nothing had checked. A value like `~unknown-user` could also abort startup. The path is now resolved once and checked as resolved. Any unusable value falls back to the Agent directory, and a stage another user could replace through a parent folder is refused. (#8471)
 
